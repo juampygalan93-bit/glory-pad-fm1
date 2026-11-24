@@ -1,297 +1,496 @@
 
 /* GLORY PAD FM-1
- * Version 0.1 - HEAVEN
- * Ambient worship pad prototype
+ * V0.2 - Worship Pad Engine
  */
 
 #include "fm1.h"
 
-#define OSC_COUNT 6
-#define ACCENT RGB(110, 190, 235)
-#define DIM RGB(100, 120, 145)
+#define OSC 6
+#define PRESET_COUNT 10
+#define FULL 16777216
+#define ACCENT RGB(155,185,255)
+#define DIM RGB(95,115,145)
+#define PANEL RGB(15,23,36)
 
-static const char *const NOTES[12] = {
-  "C", "C#", "D", "D#", "E", "F",
-  "F#", "G", "G#", "A", "A#", "B"
+static const char *const NOTES[] = {
+  "C","C#","D","D#","E","F",
+  "F#","G","G#","A","A#","B"
 };
 
-static const char *const LABELS[4] = {
-  "LEVEL", "TONE", "MOTION", "FADE"
-};
-
-static const int offsets[OSC_COUNT] = {
-  0, 0, 7, 12, 12, 19
-};
-
-static const int weights[OSC_COUNT] = {
-  6500, 5000, 4000, 2800, 2200, 1200
+static const char *const NAMES[] = {
+  "ANALOG SINE",
+  "CATHEDRAL",
+  "CLEAN ORGAN",
+  "DARK ANALOG",
+  "DARK UNO",
+  "DEFAULT",
+  "RESONANT",
+  "SOFT SQUARE",
+  "STRINGS",
+  "TRIANGLE CORE"
 };
 
 typedef struct {
-  uint32_t phase[OSC_COUNT];
-  uint32_t inc[OSC_COUNT];
-  int32_t amp;
-  int root;
-} Pad;
+  int weight[OSC];
+  int offset[OSC];
+  int shape;
+  int detune;
+} Patch;
 
-static Pad pads[2];
+static const Patch patches[PRESET_COUNT] = {
+  {{9000,3500,4200,1800,900,500},
+   {0,0,7,12,12,19},0,10},
 
-static volatile int requested_root = 0;
-static volatile int playing = 0;
+  {{6500,3500,4200,3300,2400,1800},
+   {0,0,7,12,19,24},1,12},
 
-static volatile int knob[4] = {
-  95, 45, 35, 75
+  {{6500,5000,4000,2800,2200,1200},
+   {0,0,7,12,12,19},0,8},
+
+  {{8500,4500,3500,1600,900,500},
+   {0,0,7,12,12,19},2,18},
+
+  {{10000,5000,2800,1200,600,300},
+   {-12,0,7,12,12,19},0,5},
+
+  {{7000,4000,4200,2500,1800,900},
+   {0,0,7,12,12,19},3,16},
+
+  {{6500,3500,4000,2800,2300,1200},
+   {0,0,7,12,19,24},4,12},
+
+  {{7500,4000,4000,2000,1200,600},
+   {0,0,7,12,12,19},5,15},
+
+  {{5200,4800,4200,3500,2400,1600},
+   {0,0,7,12,12,19},6,25},
+
+  {{8500,4000,3600,2200,1200,600},
+   {0,0,7,12,12,19},7,10}
 };
 
+typedef struct {
+  uint32_t phase[OSC];
+  uint32_t inc[OSC];
+  int32_t amp;
+  int root;
+  int preset;
+  int octave;
+} Bank;
+
+static Bank bank[2];
 static int current = 0;
-static uint32_t motion_phase = 0;
 
-static void tune_pad(Pad *p, int root) {
-  p->root = root;
+static volatile uint32_t request = 2u << 4 | 2u << 8;
 
-  for (int j = 0; j < OSC_COUNT; j++) {
-    uint32_t inc = note_inc(36 + root + offsets[j]);
+static volatile int level = 85;
+static volatile int tone = 55;
+static volatile int motion = 0;
+static volatile int fade = 5;
 
-    if (j == 1) inc += inc / 350;
-    if (j == 4) inc -= inc / 280;
+static volatile int quiet = 1;
 
-    p->inc[j] = inc;
+static int root = 0;
+static int preset = 2;
+static int octave = 0;
+static int playing = 0;
+
+static uint32_t lfo = 0;
+
+static int clamp(int x,int lo,int hi) {
+  if(x<lo) return lo;
+  if(x>hi) return hi;
+  return x;
+}
+
+static int wrap(int x,int n) {
+  x %= n;
+  return x<0 ? x+n : x;
+}
+
+static void publish(void) {
+  request = (uint32_t)root |
+    ((uint32_t)preset << 4) |
+    ((uint32_t)(octave+2) << 8) |
+    ((uint32_t)playing << 12);
+}
+
+static int32_t wave_sample(
+  uint32_t p,int shape,int bright
+) {
+  int32_t a = sine(p);
+  int32_t b = sine(p*2u);
+  int32_t c = sine(p*3u);
+
+  switch(shape) {
+    case 1:
+      return (a*8+b*2+c)/11;
+
+    case 2:
+      return (a*10+b+c)/12;
+
+    case 3:
+      return (a*8+b+c)/10;
+
+    case 4:
+      return (a*6+b*2+c*2+
+              sine(p*5u))/11;
+
+    case 5:
+      return (a*9+c*2+
+              sine(p*5u))/12;
+
+    case 6:
+      return (a*8+b*4+c*2+
+              sine(p*4u)+
+              sine(p*5u))/16;
+
+    case 7:
+      return (a*9-c)/10;
+
+    default:
+      return (a*512+b*bright)/
+             (512+bright);
   }
 }
 
-void audio(int32_t *out, uint32_t frames) {
+static void tune(
+  Bank *b,int r,int pr,int oct
+) {
+  const Patch *p = &patches[pr];
 
-  int root = requested_root;
-  int active = playing;
+  b->root = r;
+  b->preset = pr;
+  b->octave = oct;
 
-  int level = knob[0];
-  int tone = knob[1];
-  int motion = knob[2];
-  int fade = knob[3];
+  for(int j=0;j<OSC;j++) {
+    int n = 36+r+oct*12+p->offset[j];
+    uint32_t inc = note_inc(clamp(n,0,127));
 
-  int target = active ? level * 258 : 0;
-  int step = 1 + (127 - fade) / 12;
+    if(j==1)
+      inc += (inc/10000u)*p->detune;
 
-  if (pads[current].root != root) {
-    int next = 1 - current;
+    if(j==4)
+      inc -= (inc/10000u)*p->detune;
 
-    if (pads[next].root == root ||
-        pads[next].amp == 0) {
-      tune_pad(&pads[next], root);
-      current = next;
+    b->inc[j] = inc;
+  }
+}
+
+static int32_t approach(
+  int32_t value,int32_t target,int32_t step
+) {
+  if(value<target) {
+    value += step;
+    if(value>target) value=target;
+  } else if(value>target) {
+    value -= step;
+    if(value<target) value=target;
+  }
+  return value;
+}
+
+static int32_t limit(int32_t s) {
+  if(s>30000) return 30000;
+  if(s<-30000) return -30000;
+  return s;
+}
+
+void audio(int32_t *out,uint32_t frames) {
+
+  uint32_t req = request;
+
+  int r = req & 15;
+  int pr = (req>>4)&15;
+  int oct = ((req>>8)&7)-2;
+  int active = (req>>12)&1;
+
+  int32_t step =
+    FULL/(SAMPLE_RATE*fade);
+
+  if(step<1) step=1;
+
+  int bright=tone;
+  int depth=motion;
+  int vol=level;
+
+  if(active &&
+    (bank[current].root!=r ||
+     bank[current].preset!=pr ||
+     bank[current].octave!=oct)) {
+
+    int next=1-current;
+
+    if(bank[next].root==r &&
+       bank[next].preset==pr &&
+       bank[next].octave==oct) {
+      current=next;
+    } else if(bank[next].amp==0) {
+      tune(&bank[next],r,pr,oct);
+      current=next;
     }
   }
 
-  for (uint32_t i = 0; i < frames; i++) {
+  for(uint32_t i=0;i<frames;i++) {
 
-    motion_phase += 9000;
+    int32_t left=0,right=0;
 
-    int32_t movement =
-      (sine(motion_phase) * motion) >> 10;
+    lfo+=6000u;
 
-    int32_t left = 0;
-    int32_t right = 0;
+    int32_t move =
+      (sine(lfo)*depth)>>15;
 
-    for (int b = 0; b < 2; b++) {
+    for(int b=0;b<2;b++) {
 
-      Pad *p = &pads[b];
+      Bank *v=&bank[b];
 
-      int goal = b == current ? target : 0;
+      int32_t goal =
+        active && b==current ? FULL:0;
 
-      if (p->amp < goal) {
-        p->amp += step;
-        if (p->amp > goal) p->amp = goal;
-      } else if (p->amp > goal) {
-        p->amp -= step;
-        if (p->amp < goal) p->amp = goal;
-      }
+      v->amp=approach(v->amp,goal,step);
 
-      if (!p->amp) continue;
+      if(v->amp==0) continue;
 
-      int32_t l = 0;
-      int32_t r = 0;
+      const Patch *p=&patches[v->preset];
 
-      for (int j = 0; j < OSC_COUNT; j++) {
+      int32_t l=0,rr=0;
 
-        p->phase[j] += p->inc[j];
+      for(int j=0;j<OSC;j++) {
 
-        int32_t fundamental = sine(p->phase[j]);
+        v->phase[j]+=v->inc[j];
 
-        int32_t harmonic =
-          (sine(p->phase[j] * 2u) * tone) >> 9;
+        int32_t s=wave_sample(
+          v->phase[j],p->shape,bright
+        );
 
-        int32_t s = fundamental + harmonic;
+        int32_t w=p->weight[j];
 
-        int32_t weight = weights[j];
-
-        if (j >= 3) {
-          weight += (movement * 2);
-          if (weight < 0) weight = 0;
+        if(j>=3) {
+          w+=(w*move)>>10;
         }
 
-        s = (s * weight) >> 15;
+        s=(s*w)>>15;
 
-        if (j == 1 || j == 4) {
-          l += s / 2;
-          r += s;
-        } else if (j == 2 || j == 5) {
-          l += s;
-          r += s / 2;
+        if(j==1 || j==4) {
+          l+=s/2;
+          rr+=s;
+        } else if(j==2 || j==5) {
+          l+=s;
+          rr+=s/2;
         } else {
-          l += s;
-          r += s;
+          l+=s;
+          rr+=s;
         }
       }
 
-      left += (l * p->amp) >> 15;
-      right += (r * p->amp) >> 15;
+      int32_t gain=v->amp>>9;
+
+      left+=(l*gain)>>15;
+      right+=(rr*gain)>>15;
     }
 
-    out[2 * i] += left;
-    out[2 * i + 1] += right;
+    left=(left*vol)>>7;
+    right=(right*vol)>>7;
+
+    out[2*i]+=limit(left);
+    out[2*i+1]+=limit(right);
   }
+
+  quiet = bank[0].amp==0 &&
+          bank[1].amp==0;
 }
 
 static void centered(
-  int y,
-  const char *s,
-  uint16_t color,
-  int font
+  int y,const char *s,
+  uint16_t color,int font
 ) {
-  rect(0, y, SCREEN_W, text_height(font), BLACK);
+  rect(0,y,240,text_height(font),BLACK);
 
   text(
-    (SCREEN_W - text_width(s, font)) / 2,
-    y, s, color, font
+    (240-text_width(s,font))/2,
+    y,s,color,font
   );
 }
 
-static void draw_status(void) {
+static void draw_header(void) {
 
-  centered(18, "GLORY PAD", ACCENT, FONT_BIG);
+  centered(8,"GLORY PAD 0.2",
+           ACCENT,FONT_SMALL);
 
-  centered(52, "HEAVEN", WHITE, FONT_SMALL);
+  centered(34,NAMES[preset],
+           WHITE,FONT_SMALL);
+}
 
-  rect(0, 78, SCREEN_W, 52, BLACK);
+static void draw_note(void) {
 
-  centered(88, NOTES[requested_root],
-           WHITE, FONT_BIG);
+  rect(0,60,240,100,BLACK);
+
+  frame(78,62,84,72,DIM);
+  frame(81,65,78,66,ACCENT);
+
+  text(
+    (240-text_width(NOTES[root],
+      FONT_BIG))/2,
+    82,NOTES[root],WHITE,FONT_BIG
+  );
 
   centered(
-    145,
-    playing ? "PAD ON" : "STANDBY",
-    playing ? ACCENT : DIM,
+    143,
+    playing?"PAD ACTIVE":"STANDBY",
+    playing?ACCENT:DIM,
     FONT_SMALL
   );
 }
 
-static void draw_knob(int k) {
+static void draw_knobs(void) {
 
-  char value[12];
-  int x = k * 60;
+  const char *labels[]={
+    "LEVEL","TONE","MOTION","FADE"
+  };
 
-  format_int(value, knob[k]);
+  int values[]={level,tone,motion,fade};
 
-  rect(x, 180, 60, 52, BLACK);
+  for(int k=0;k<4;k++) {
 
-  text(
-    x + (60 - text_width(
-      LABELS[k], FONT_SMALL)) / 2,
-    180, LABELS[k], DIM, FONT_SMALL
-  );
+    int x=k*60;
+    char val[12];
 
-  text(
-    x + (60 - text_width(
-      value, FONT_BIG)) / 2,
-    198, value, ACCENT, FONT_BIG
-  );
+    format_int(val,values[k]);
+
+    rect(x,177,60,60,BLACK);
+
+    text(
+      x+(60-text_width(labels[k],
+        FONT_SMALL))/2,
+      177,labels[k],DIM,FONT_SMALL
+    );
+
+    text(
+      x+(60-text_width(val,
+        FONT_BIG))/2,
+      198,val,ACCENT,FONT_BIG
+    );
+
+    int width=k==3 ?
+      values[k]*50/10 :
+      values[k]*50/127;
+
+    rect(x+5,232,50,3,PANEL);
+    rect(x+5,232,width,3,ACCENT);
+  }
 }
 
 void setup(void) {
 
-  tune_pad(&pads[0], 0);
-  tune_pad(&pads[1], 0);
+  tune(&bank[0],root,preset,octave);
+  tune(&bank[1],root,preset,octave);
+
+  publish();
 
   clear(BLACK);
-
-  draw_status();
-
-  for (int k = 0; k < 4; k++) {
-    draw_knob(k);
-  }
+  draw_header();
+  draw_note();
+  draw_knobs();
 }
 
 void loop(void) {
 
-  int changed = 0;
+  int update=0;
+  int redraw=0;
 
-  for (int k = 0; k < KEY_COUNT; k++) {
+  for(int k=0;k<KEY_COUNT;k++) {
 
-    if (key_pressed(k)) {
-
-      requested_root =
-        (KEY_FIRST_NOTE + k) % 12;
-
-      playing = 1;
-      changed = 1;
+    if(key_pressed(k)) {
+      root=(KEY_FIRST_NOTE+k)%12;
+      playing=1;
+      update=1;
     }
   }
 
-  uint8_t st, d1, d2;
+  uint8_t st,d1,d2;
 
-  while (midi_read(&st, &d1, &d2)) {
+  while(midi_read(&st,&d1,&d2)) {
 
-    if ((st & 0xF0) == 0x90 && d2) {
-      requested_root = d1 % 12;
-      playing = 1;
-      changed = 1;
+    if((st&0xF0)==0x90 && d2) {
+      root=d1%12;
+      playing=1;
+      update=1;
     }
   }
 
-  int delta = encoder(ENC_SELECT);
+  int d=encoder(ENC_SELECT);
 
-  if (delta) {
-
-    int root = (requested_root + delta) % 12;
-
-    if (root < 0) root += 12;
-
-    requested_root = root;
-    changed = 1;
+  if(d) {
+    root=wrap(root+d,12);
+    update=1;
   }
 
-  if (button_pressed(BTN_PLAY)) {
+  d=encoder(ENC_PRESETS);
 
-    playing = !playing;
-    changed = 1;
+  if(d) {
+    preset=wrap(preset+d,PRESET_COUNT);
+    update=1;
   }
 
-  for (int k = 0; k < 4; k++) {
+  int o=octave+
+    button_pressed(BTN_OCT_UP)-
+    button_pressed(BTN_OCT_DOWN);
 
-    int value =
-      knob[k] + encoder(ENC_KNOB1 + k);
+  o=clamp(o,-2,2);
 
-    if (value < 0) value = 0;
-    if (value > 127) value = 127;
-
-    if (value != knob[k]) {
-
-      knob[k] = value;
-      draw_knob(k);
-    }
+  if(o!=octave) {
+    octave=o;
+    update=1;
   }
 
-  led_button(BTN_PLAY, playing);
-
-  for (int k = 0; k < KEY_COUNT; k++) {
-
-    led_key(
-      k,
-      playing &&
-      (KEY_FIRST_NOTE + k) % 12 ==
-      requested_root
-    );
+  if(button_pressed(BTN_PLAY)) {
+    playing=!playing;
+    update=1;
   }
 
-  if (changed) draw_status();
+  d=encoder(ENC_KNOB1);
+  if(d) {
+    level=clamp(level+d,0,127);
+    redraw=1;
+  }
+
+  d=encoder(ENC_KNOB2);
+  if(d) {
+    tone=clamp(tone+d,0,127);
+    redraw=1;
+  }
+
+  d=encoder(ENC_KNOB3);
+  if(d) {
+    motion=clamp(motion+d,0,127);
+    redraw=1;
+  }
+
+  d=encoder(ENC_KNOB4);
+  if(d) {
+    fade=clamp(fade+d,1,10);
+    redraw=1;
+  }
+
+  if(button_pressed(BTN_HOME)) {
+    update=1;
+    redraw=1;
+  }
+
+  if(update) {
+    publish();
+    draw_header();
+    draw_note();
+  }
+
+  if(redraw) draw_knobs();
+
+  led_button(BTN_PLAY,playing);
+  led_button(BTN_OCT_DOWN,octave<0);
+  led_button(BTN_OCT_UP,octave>0);
+
+  for(int k=0;k<KEY_COUNT;k++) {
+    led_key(k,playing &&
+      (KEY_FIRST_NOTE+k)%12==root);
+  }
 }
