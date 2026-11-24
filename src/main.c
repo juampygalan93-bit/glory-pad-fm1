@@ -1,496 +1,69 @@
-
-/* GLORY PAD FM-1
- * V0.2 - Worship Pad Engine
- */
-
+/* GLORY PAD 0.3.1 - Worship Edition */
 #include "fm1.h"
-
-#define OSC 6
-#define PRESET_COUNT 10
+#define N 6
 #define FULL 16777216
-#define ACCENT RGB(155,185,255)
-#define DIM RGB(95,115,145)
-#define PANEL RGB(15,23,36)
-
-static const char *const NOTES[] = {
-  "C","C#","D","D#","E","F",
-  "F#","G","G#","A","A#","B"
+#define COUNT 20
+static const char *const notes[]={"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+static const char *const names[]={"ANALOG SINE","CATHEDRAL","CLEAN ORGAN","DARK ANALOG","DARK UNO","DEFAULT","RESONANT","SOFT SQUARE","STRINGS","TRIANGLE CORE","HEAVEN OPEN","HOLY PRESENCE","ATMOSPHERE","ETERNAL","SOAKING","ABBA","HOLY STRINGS","ENDLESS GLORY","AMBIENT GUITAR","SECRET PLACE"};
+typedef struct {int w[N],o[N],shape,detune;} Patch;
+static const Patch patches[COUNT]={
+{{9000,3500,4200,1800,900,500},{0,0,7,12,12,19},0,10},
+{{6500,3500,4200,3300,2400,1800},{0,0,7,12,19,24},1,12},
+{{6500,5000,4000,2800,2200,1200},{0,0,7,12,12,19},0,8},
+{{8500,4500,3500,1600,900,500},{0,0,7,12,12,19},2,18},
+{{10000,5000,2800,1200,600,300},{-12,0,7,12,12,19},0,5},
+{{7000,4000,4200,2500,1800,900},{0,0,7,12,12,19},3,16},
+{{6500,3500,4000,2800,2300,1200},{0,0,7,12,19,24},4,12},
+{{7500,4000,4000,2000,1200,600},{0,0,7,12,12,19},5,15},
+{{5200,4800,4200,3500,2400,1600},{0,0,7,12,12,19},6,25},
+{{8500,4000,3600,2200,1200,600},{0,0,7,12,12,19},7,10},
+{{4200,3300,4200,4400,2700,1600},{0,12,7,12,24,31},8,18},
+{{7600,3200,4200,2800,1700,900},{0,-12,7,12,19,24},9,9},
+{{5500,2500,3700,3500,3300,1400},{0,12,7,19,24,31},10,22},
+{{6500,3200,4000,3700,2200,1100},{0,-12,7,12,24,19},8,15},
+{{8500,1800,4000,2500,900,400},{0,0,7,12,19,24},11,4},
+{{7200,2600,4200,2800,1200,700},{0,12,7,12,19,24},7,8},
+{{5200,3500,4300,3900,2500,1400},{0,12,7,12,19,24},12,20},
+{{4800,2600,3800,3600,3000,2400},{0,12,7,19,24,31},10,14},
+{{6300,3000,4400,2800,1500,900},{0,12,7,12,19,24},13,9},
+{{9500,1500,3500,1600,600,300},{0,-12,7,12,19,24},11,3}
 };
-
-static const char *const NAMES[] = {
-  "ANALOG SINE",
-  "CATHEDRAL",
-  "CLEAN ORGAN",
-  "DARK ANALOG",
-  "DARK UNO",
-  "DEFAULT",
-  "RESONANT",
-  "SOFT SQUARE",
-  "STRINGS",
-  "TRIANGLE CORE"
-};
-
-typedef struct {
-  int weight[OSC];
-  int offset[OSC];
-  int shape;
-  int detune;
-} Patch;
-
-static const Patch patches[PRESET_COUNT] = {
-  {{9000,3500,4200,1800,900,500},
-   {0,0,7,12,12,19},0,10},
-
-  {{6500,3500,4200,3300,2400,1800},
-   {0,0,7,12,19,24},1,12},
-
-  {{6500,5000,4000,2800,2200,1200},
-   {0,0,7,12,12,19},0,8},
-
-  {{8500,4500,3500,1600,900,500},
-   {0,0,7,12,12,19},2,18},
-
-  {{10000,5000,2800,1200,600,300},
-   {-12,0,7,12,12,19},0,5},
-
-  {{7000,4000,4200,2500,1800,900},
-   {0,0,7,12,12,19},3,16},
-
-  {{6500,3500,4000,2800,2300,1200},
-   {0,0,7,12,19,24},4,12},
-
-  {{7500,4000,4000,2000,1200,600},
-   {0,0,7,12,12,19},5,15},
-
-  {{5200,4800,4200,3500,2400,1600},
-   {0,0,7,12,12,19},6,25},
-
-  {{8500,4000,3600,2200,1200,600},
-   {0,0,7,12,12,19},7,10}
-};
-
-typedef struct {
-  uint32_t phase[OSC];
-  uint32_t inc[OSC];
-  int32_t amp;
-  int root;
-  int preset;
-  int octave;
-} Bank;
-
-static Bank bank[2];
-static int current = 0;
-
-static volatile uint32_t request = 2u << 4 | 2u << 8;
-
-static volatile int level = 85;
-static volatile int tone = 55;
-static volatile int motion = 0;
-static volatile int fade = 5;
-
-static volatile int quiet = 1;
-
-static int root = 0;
-static int preset = 2;
-static int octave = 0;
-static int playing = 0;
-
-static uint32_t lfo = 0;
-
-static int clamp(int x,int lo,int hi) {
-  if(x<lo) return lo;
-  if(x>hi) return hi;
-  return x;
-}
-
-static int wrap(int x,int n) {
-  x %= n;
-  return x<0 ? x+n : x;
-}
-
-static void publish(void) {
-  request = (uint32_t)root |
-    ((uint32_t)preset << 4) |
-    ((uint32_t)(octave+2) << 8) |
-    ((uint32_t)playing << 12);
-}
-
-static int32_t wave_sample(
-  uint32_t p,int shape,int bright
-) {
-  int32_t a = sine(p);
-  int32_t b = sine(p*2u);
-  int32_t c = sine(p*3u);
-
-  switch(shape) {
-    case 1:
-      return (a*8+b*2+c)/11;
-
-    case 2:
-      return (a*10+b+c)/12;
-
-    case 3:
-      return (a*8+b+c)/10;
-
-    case 4:
-      return (a*6+b*2+c*2+
-              sine(p*5u))/11;
-
-    case 5:
-      return (a*9+c*2+
-              sine(p*5u))/12;
-
-    case 6:
-      return (a*8+b*4+c*2+
-              sine(p*4u)+
-              sine(p*5u))/16;
-
-    case 7:
-      return (a*9-c)/10;
-
-    default:
-      return (a*512+b*bright)/
-             (512+bright);
-  }
-}
-
-static void tune(
-  Bank *b,int r,int pr,int oct
-) {
-  const Patch *p = &patches[pr];
-
-  b->root = r;
-  b->preset = pr;
-  b->octave = oct;
-
-  for(int j=0;j<OSC;j++) {
-    int n = 36+r+oct*12+p->offset[j];
-    uint32_t inc = note_inc(clamp(n,0,127));
-
-    if(j==1)
-      inc += (inc/10000u)*p->detune;
-
-    if(j==4)
-      inc -= (inc/10000u)*p->detune;
-
-    b->inc[j] = inc;
-  }
-}
-
-static int32_t approach(
-  int32_t value,int32_t target,int32_t step
-) {
-  if(value<target) {
-    value += step;
-    if(value>target) value=target;
-  } else if(value>target) {
-    value -= step;
-    if(value<target) value=target;
-  }
-  return value;
-}
-
-static int32_t limit(int32_t s) {
-  if(s>30000) return 30000;
-  if(s<-30000) return -30000;
-  return s;
-}
-
-void audio(int32_t *out,uint32_t frames) {
-
-  uint32_t req = request;
-
-  int r = req & 15;
-  int pr = (req>>4)&15;
-  int oct = ((req>>8)&7)-2;
-  int active = (req>>12)&1;
-
-  int32_t step =
-    FULL/(SAMPLE_RATE*fade);
-
-  if(step<1) step=1;
-
-  int bright=tone;
-  int depth=motion;
-  int vol=level;
-
-  if(active &&
-    (bank[current].root!=r ||
-     bank[current].preset!=pr ||
-     bank[current].octave!=oct)) {
-
-    int next=1-current;
-
-    if(bank[next].root==r &&
-       bank[next].preset==pr &&
-       bank[next].octave==oct) {
-      current=next;
-    } else if(bank[next].amp==0) {
-      tune(&bank[next],r,pr,oct);
-      current=next;
-    }
-  }
-
-  for(uint32_t i=0;i<frames;i++) {
-
-    int32_t left=0,right=0;
-
-    lfo+=6000u;
-
-    int32_t move =
-      (sine(lfo)*depth)>>15;
-
-    for(int b=0;b<2;b++) {
-
-      Bank *v=&bank[b];
-
-      int32_t goal =
-        active && b==current ? FULL:0;
-
-      v->amp=approach(v->amp,goal,step);
-
-      if(v->amp==0) continue;
-
-      const Patch *p=&patches[v->preset];
-
-      int32_t l=0,rr=0;
-
-      for(int j=0;j<OSC;j++) {
-
-        v->phase[j]+=v->inc[j];
-
-        int32_t s=wave_sample(
-          v->phase[j],p->shape,bright
-        );
-
-        int32_t w=p->weight[j];
-
-        if(j>=3) {
-          w+=(w*move)>>10;
-        }
-
-        s=(s*w)>>15;
-
-        if(j==1 || j==4) {
-          l+=s/2;
-          rr+=s;
-        } else if(j==2 || j==5) {
-          l+=s;
-          rr+=s/2;
-        } else {
-          l+=s;
-          rr+=s;
-        }
-      }
-
-      int32_t gain=v->amp>>9;
-
-      left+=(l*gain)>>15;
-      right+=(rr*gain)>>15;
-    }
-
-    left=(left*vol)>>7;
-    right=(right*vol)>>7;
-
-    out[2*i]+=limit(left);
-    out[2*i+1]+=limit(right);
-  }
-
-  quiet = bank[0].amp==0 &&
-          bank[1].amp==0;
-}
-
-static void centered(
-  int y,const char *s,
-  uint16_t color,int font
-) {
-  rect(0,y,240,text_height(font),BLACK);
-
-  text(
-    (240-text_width(s,font))/2,
-    y,s,color,font
-  );
-}
-
-static void draw_header(void) {
-
-  centered(8,"GLORY PAD 0.2",
-           ACCENT,FONT_SMALL);
-
-  centered(34,NAMES[preset],
-           WHITE,FONT_SMALL);
-}
-
-static void draw_note(void) {
-
-  rect(0,60,240,100,BLACK);
-
-  frame(78,62,84,72,DIM);
-  frame(81,65,78,66,ACCENT);
-
-  text(
-    (240-text_width(NOTES[root],
-      FONT_BIG))/2,
-    82,NOTES[root],WHITE,FONT_BIG
-  );
-
-  centered(
-    143,
-    playing?"PAD ACTIVE":"STANDBY",
-    playing?ACCENT:DIM,
-    FONT_SMALL
-  );
-}
-
-static void draw_knobs(void) {
-
-  const char *labels[]={
-    "LEVEL","TONE","MOTION","FADE"
-  };
-
-  int values[]={level,tone,motion,fade};
-
-  for(int k=0;k<4;k++) {
-
-    int x=k*60;
-    char val[12];
-
-    format_int(val,values[k]);
-
-    rect(x,177,60,60,BLACK);
-
-    text(
-      x+(60-text_width(labels[k],
-        FONT_SMALL))/2,
-      177,labels[k],DIM,FONT_SMALL
-    );
-
-    text(
-      x+(60-text_width(val,
-        FONT_BIG))/2,
-      198,val,ACCENT,FONT_BIG
-    );
-
-    int width=k==3 ?
-      values[k]*50/10 :
-      values[k]*50/127;
-
-    rect(x+5,232,50,3,PANEL);
-    rect(x+5,232,width,3,ACCENT);
-  }
-}
-
-void setup(void) {
-
-  tune(&bank[0],root,preset,octave);
-  tune(&bank[1],root,preset,octave);
-
-  publish();
-
-  clear(BLACK);
-  draw_header();
-  draw_note();
-  draw_knobs();
-}
-
-void loop(void) {
-
-  int update=0;
-  int redraw=0;
-
-  for(int k=0;k<KEY_COUNT;k++) {
-
-    if(key_pressed(k)) {
-      root=(KEY_FIRST_NOTE+k)%12;
-      playing=1;
-      update=1;
-    }
-  }
-
-  uint8_t st,d1,d2;
-
-  while(midi_read(&st,&d1,&d2)) {
-
-    if((st&0xF0)==0x90 && d2) {
-      root=d1%12;
-      playing=1;
-      update=1;
-    }
-  }
-
-  int d=encoder(ENC_SELECT);
-
-  if(d) {
-    root=wrap(root+d,12);
-    update=1;
-  }
-
-  d=encoder(ENC_PRESETS);
-
-  if(d) {
-    preset=wrap(preset+d,PRESET_COUNT);
-    update=1;
-  }
-
-  int o=octave+
-    button_pressed(BTN_OCT_UP)-
-    button_pressed(BTN_OCT_DOWN);
-
-  o=clamp(o,-2,2);
-
-  if(o!=octave) {
-    octave=o;
-    update=1;
-  }
-
-  if(button_pressed(BTN_PLAY)) {
-    playing=!playing;
-    update=1;
-  }
-
-  d=encoder(ENC_KNOB1);
-  if(d) {
-    level=clamp(level+d,0,127);
-    redraw=1;
-  }
-
-  d=encoder(ENC_KNOB2);
-  if(d) {
-    tone=clamp(tone+d,0,127);
-    redraw=1;
-  }
-
-  d=encoder(ENC_KNOB3);
-  if(d) {
-    motion=clamp(motion+d,0,127);
-    redraw=1;
-  }
-
-  d=encoder(ENC_KNOB4);
-  if(d) {
-    fade=clamp(fade+d,1,10);
-    redraw=1;
-  }
-
-  if(button_pressed(BTN_HOME)) {
-    update=1;
-    redraw=1;
-  }
-
-  if(update) {
-    publish();
-    draw_header();
-    draw_note();
-  }
-
-  if(redraw) draw_knobs();
-
-  led_button(BTN_PLAY,playing);
-  led_button(BTN_OCT_DOWN,octave<0);
-  led_button(BTN_OCT_UP,octave>0);
-
-  for(int k=0;k<KEY_COUNT;k++) {
-    led_key(k,playing &&
-      (KEY_FIRST_NOTE+k)%12==root);
-  }
-}
+typedef struct {uint32_t ph[N],inc[N];int32_t amp;int root,preset,oct;} Bank;
+static Bank bank[2];static int current;
+static volatile uint32_t request=(2u<<4)|(2u<<9);
+static volatile int level=85,tone=55,motion=0,fade=5,quiet=1;
+static int root=0,preset=2,oct=0,playing=0,theme=0;
+static uint32_t lfo;
+static const uint16_t colors[]={RGB(164,191,255),RGB(237,196,126),RGB(198,160,255),RGB(114,217,223),RGB(146,213,174),RGB(238,238,238),RGB(237,141,133),RGB(233,163,200)};
+static const uint16_t backgrounds[]={RGB(8,15,32),RGB(24,17,8),RGB(20,12,32),RGB(7,25,30),RGB(9,26,18),RGB(16,16,16),RGB(32,12,12),RGB(32,14,26)};
+static const char *const themes[]={"HEAVEN","GLORY","PRESENCE","OCEAN","EDEN","PURE","EMBER","ROSE"};
+static int clamp(int x,int a,int b){return x<a?a:x>b?b:x;}
+static int wrap(int x,int n){x%=n;return x<0?x+n:x;}
+static void publish(void){request=(uint32_t)root|((uint32_t)preset<<4)|((uint32_t)(oct+2)<<9)|((uint32_t)playing<<12);}
+static int32_t wave(uint32_t p,int sh,int br){int32_t a=sine(p),b=sine(p*2u),c=sine(p*3u);switch(sh){
+case 1:return (a*8+b*2+c)/11;
+case 2:return (a*10+b+c)/12;
+case 3:return (a*8+b+c)/10;
+case 4:return (a*6+b*2+c*2+sine(p*5u))/11;
+case 5:return (a*9+c*2+sine(p*5u))/12;
+case 6:return (a*8+b*4+c*2+sine(p*4u)+sine(p*5u))/16;
+case 7:return (a*9-c)/10;
+case 8:return (a*12+b*3+c*2+sine(p*4u))/18;
+case 9:return (a*16+b*2-c)/19;
+case 10:return (a*12+sine(p*4u)*2+sine(p*6u))/15;
+case 11:return (a*24+b)/25;
+case 12:return (a*10+b*5+c*3+sine(p*4u)*2+sine(p*5u))/21;
+case 13:return (a*12+b*4-c*2+sine(p*5u))/19;
+default:return (a*512+b*br)/(512+br);}}
+static void tune(Bank *b,int r,int p,int o){b->root=r;b->preset=p;b->oct=o;for(int j=0;j<N;j++){uint32_t inc=note_inc(clamp(36+r+o*12+patches[p].o[j],0,127));if(j==1)inc+=(inc/10000u)*patches[p].detune;if(j==4)inc-=(inc/10000u)*patches[p].detune;b->inc[j]=inc;}}
+static int match(Bank *b,int r,int p,int o){return b->root==r&&b->preset==p&&b->oct==o;}
+static int32_t approach(int32_t a,int32_t b,int32_t s){return a<b?(a+s>b?b:a+s):a>b?(a-s<b?b:a-s):a;}
+void audio(int32_t *out,uint32_t frames){uint32_t q=request;int r=q&15,p=(q>>4)&31,o=((q>>9)&7)-2,on=(q>>12)&1;int vol=level,br=tone,dep=motion;int32_t step=FULL/(SAMPLE_RATE*fade);if(step<1)step=1;
+if(on&&!match(&bank[current],r,p,o)){int next=1-current;if(match(&bank[next],r,p,o))current=next;else if(!bank[next].amp){tune(&bank[next],r,p,o);current=next;}}
+for(uint32_t i=0;i<frames;i++){int32_t L=0,R=0;lfo+=6000u;int32_t mv=(sine(lfo)*dep)>>15;for(int k=0;k<2;k++){Bank *b=&bank[k];b->amp=approach(b->amp,on&&k==current?FULL:0,step);if(!b->amp)continue;int32_t l=0,rr=0;const Patch *pt=&patches[b->preset];for(int j=0;j<N;j++){b->ph[j]+=b->inc[j];int32_t w=pt->w[j];if(j>=3)w+=(w*mv)>>10;int32_t s=(wave(b->ph[j],pt->shape,br)*w)>>15;if(j==1||j==4){l+=s/2;rr+=s;}else if(j==2||j==5){l+=s;rr+=s/2;}else{l+=s;rr+=s;}}int32_t g=b->amp>>9;L+=(l*g)>>15;R+=(rr*g)>>15;}out[2*i]+=clamp((L*vol)>>7,-30000,30000);out[2*i+1]+=clamp((R*vol)>>7,-30000,30000);}
+quiet=!bank[0].amp&&!bank[1].amp;}
+static void center(int y,const char*s,uint16_t c,int font){text((240-text_width(s,font))/2,y,s,c,font);}
+static void ring(int radius,uint16_t c,int dotted){for(int i=0;i<128;i++){if(dotted&&i%3)continue;uint32_t p=(uint32_t)i<<25;int x=120+((sine(p)*radius)>>15),y=105+((sine(p+0x40000000u)*radius)>>15);pixel(x,y,c);}}
+static void screen(void){uint16_t bg=backgrounds[theme],ac=colors[theme];clear(bg);center(4,"G L O R Y  P A D",ac,FONT_SMALL);center(25,names[preset],WHITE,FONT_SMALL);for(int i=0;i<52;i++){int x=8+(i*73)%224,y=46+(i*41)%115;pixel(x,y,ac);}ring(51,ac,1);ring(46,ac,0);ring(42,ac,1);rect(92,88,56,34,bg);center(89,notes[root],WHITE,FONT_BIG);text(8,87,"OCT",ac,FONT_SMALL);char v[12];format_int(v,oct);text(16,106,v,WHITE,FONT_SMALL);text(192,87,"V0.3",ac,FONT_SMALL);rect(60,152,120,18,bg);center(152,playing?"PAD ACTIVE":"STANDBY",ac,FONT_SMALL);center(170,themes[theme],ac,FONT_SMALL);line(8,188,232,188,ac);const char *labels[]={"LEVEL","TONE","MOTION","FADE"};int values[]={level,tone,motion,fade};for(int k=0;k<4;k++){int x=k*60;format_int(v,values[k]);text(x+(60-text_width(labels[k],FONT_SMALL))/2,192,labels[k],ac,FONT_SMALL);text(x+(60-text_width(v,FONT_SMALL))/2,210,v,WHITE,FONT_SMALL);rect(x+5,232,(k==3?values[k]*50/10:values[k]*50/127),2,ac);}}
+void setup(void){uint8_t saved[2]={0,0};if(!settings_load(saved,sizeof saved)&&saved[0]==37&&saved[1]<8)theme=saved[1];tune(&bank[0],root,preset,oct);tune(&bank[1],root,preset,oct);publish();screen();}
+void loop(void){int changed=0;for(int k=0;k<KEY_COUNT;k++)if(key_pressed(k)){root=(KEY_FIRST_NOTE+k)%12;playing=1;changed=1;}uint8_t st,d1,d2;while(midi_read(&st,&d1,&d2))if((st&0xF0)==0x90&&d2){root=d1%12;playing=1;changed=1;}int d=encoder(ENC_SELECT);if(d){root=wrap(root+d,12);changed=1;}d=encoder(ENC_PRESETS);if(d){preset=wrap(preset+d,COUNT);changed=1;}int o=clamp(oct+button_pressed(BTN_OCT_UP)-button_pressed(BTN_OCT_DOWN),-2,2);if(o!=oct){oct=o;changed=1;}if(button_pressed(BTN_PLAY)){playing=!playing;changed=1;}if(button_pressed(BTN_GLO)){theme=(theme+1)%8;changed=1;}if(button_pressed(BTN_HOME))changed=1;d=encoder(ENC_KNOB1);if(d){level=clamp(level+d,0,127);changed=1;}d=encoder(ENC_KNOB2);if(d){tone=clamp(tone+d,0,127);changed=1;}d=encoder(ENC_KNOB3);if(d){motion=clamp(motion+d,0,127);changed=1;}d=encoder(ENC_KNOB4);if(d){fade=clamp(fade+d,1,10);changed=1;}if(button_pressed(BTN_SAVE)&&!playing&&quiet){uint8_t saved[2]={37,(uint8_t)theme};settings_save(saved,sizeof saved);}if(changed){publish();screen();}led_button(BTN_PLAY,playing);led_button(BTN_OCT_DOWN,oct<0);led_button(BTN_OCT_UP,oct>0);for(int k=0;k<KEY_COUNT;k++)led_key(k,playing&&(KEY_FIRST_NOTE+k)%12==root);}
