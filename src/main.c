@@ -1,4 +1,4 @@
-/* GLORY PAD 2.0.0 - original spectral-loop prototype.
+/* GLORY PAD 2.0.1 - original spectral-loop prototype.
  * 32768 signed 8-bit samples, generated offline at 8192 Hz, C3.
  * No third-party audio or previous synthesis engine. */
 #include "fm1.h"
@@ -1042,7 +1042,7 @@ static int16_t d0[1423],d1[1877],d2[2381],d3[3011];
 static unsigned i0,i1,i2,i3; static int32_t lp[4];
 static int clamp(int x,int lo,int hi){return x<lo?lo:x>hi?hi:x;}
 static int32_t readtex(uint32_t p){unsigned i=(p>>16)&MASK;int a=texture[i],b=texture[(i+1)&MASK];return a*256+((b-a)*(int)(p&65535u))/256;}
-static void tune(Voice *v,int r){v->note=r;v->inc=(pitch[r]*44100u)/SAMPLE_RATE;v->phase=0;}
+static void tune(Voice *v,int r){v->note=r;v->inc=pitch[r]; /* pitch table calibrated for 44100 Hz */v->phase=0;}
 static int32_t smooth(int32_t a,int32_t b,int s){return a<b?clamp(a+s,a,b):a>b?clamp(a-s,b,a):a;}
 void audio(int32_t *out,uint32_t frames){
  unsigned q=request;int r=q&15,on=(q>>4)&1;int wet=verb,vol=level;
@@ -1059,8 +1059,8 @@ void audio(int32_t *out,uint32_t frames){
  if(!v->gain)continue;
  v->phase+=v->inc;
  int32_t a=readtex(v->phase),b=readtex(v->phase+0x29a30000u);
- int g=v->gain>>16;
- l+=((a*3+b)*g)>>18;rr+=((b*3+a)*g)>>18;
+ int g=v->gain>>18;
+ l+=((a*3+b)*g)>>16;rr+=((b*3+a)*g)>>16;
  }
  l/=2;rr/=2;
  int32_t a=d0[i0],b=d1[i1],c=d2[i2],d=d3[i3];
@@ -1073,11 +1073,12 @@ void audio(int32_t *out,uint32_t frames){
  d3[i3]=clamp(rr/2+(A-B-C+D)*112/256,-30000,30000);
  if(++i0==1423)i0=0;if(++i1==1877)i1=0;if(++i2==2381)i2=0;if(++i3==3011)i3=0;
  int32_t wl=(a+c-b/2)/2,wr=(b+d-a/2)/2;
- out[2*i]+=clamp(((l*(127-wet)+wl*wet)/127)*vol/127,-30000,30000);
- out[2*i+1]+=clamp(((rr*(127-wet)+wr*wet)/127)*vol/127,-30000,30000);
+ int w=wet+(wet==127), vscale=vol+(vol==127);
+ out[2*i]+=clamp((((l*(128-w)+wl*w)>>7)*vscale)>>7,-30000,30000);
+ out[2*i+1]+=clamp((((rr*(128-w)+wr*w)>>7)*vscale)>>7,-30000,30000);
  }
 }
 static void center(int y,const char*s,uint16_t c,int font){text((240-text_width(s,font))/2,y,s,c,font);}
-static void screen(void){uint16_t bg=RGB(8,15,32),ac=RGB(164,191,255);clear(bg);center(8,"GLORY PAD 2.0",ac,FONT_SMALL);center(35,"AMBIENT PROTOTYPE",WHITE,FONT_SMALL);center(85,notes[root],WHITE,FONT_BIG);center(145,playing?"PAD ACTIVE":"STANDBY",ac,FONT_SMALL);const char *labels[]={"LEVEL","REVERB","FADE"};int vals[]={level,verb,fade};char v[12];for(int k=0;k<3;k++){int x=k*80;format_int(v,vals[k]);text(x+(80-text_width(labels[k],FONT_SMALL))/2,190,labels[k],ac,FONT_SMALL);text(x+(80-text_width(v,FONT_SMALL))/2,210,v,WHITE,FONT_SMALL);}}
+static void screen(void){uint16_t bg=RGB(8,15,32),ac=RGB(164,191,255);clear(bg);center(8,"GLORY PAD 2.0.1",ac,FONT_SMALL);center(35,"AMBIENT PROTOTYPE",WHITE,FONT_SMALL);center(85,notes[root],WHITE,FONT_BIG);center(145,playing?"PAD ACTIVE":"STANDBY",ac,FONT_SMALL);const char *labels[]={"LEVEL","REVERB","FADE"};int vals[]={level,verb,fade};char v[12];for(int k=0;k<3;k++){int x=k*80;format_int(v,vals[k]);text(x+(80-text_width(labels[k],FONT_SMALL))/2,190,labels[k],ac,FONT_SMALL);text(x+(80-text_width(v,FONT_SMALL))/2,210,v,WHITE,FONT_SMALL);}}
 void setup(void){tune(&voices[0],0);tune(&voices[1],0);screen();}
 void loop(void){int changed=0;for(int k=0;k<KEY_COUNT;k++)if(key_pressed(k)){root=(KEY_FIRST_NOTE+k)%12;playing=1;changed=1;}uint8_t st,d1m,d2m;while(midi_read(&st,&d1m,&d2m))if((st&0xf0)==0x90&&d2m){root=d1m%12;playing=1;changed=1;}int d=encoder(ENC_SELECT);if(d){root=(root+d%12+12)%12;changed=1;}if(button_pressed(BTN_PLAY)){playing=!playing;changed=1;}d=encoder(ENC_KNOB1);if(d){level=clamp(level+d,0,127);changed=1;}d=encoder(ENC_KNOB2);if(d){verb=clamp(verb+d,0,127);changed=1;}d=encoder(ENC_KNOB3);if(d){fade=clamp(fade+d,1,8);changed=1;}if(changed){request=(unsigned)root|((unsigned)playing<<4);screen();}led_button(BTN_PLAY,playing);for(int k=0;k<KEY_COUNT;k++)led_key(k,playing&&(KEY_FIRST_NOTE+k)%12==root);}
