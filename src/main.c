@@ -1,3 +1,35 @@
+/* GLORY PAD 0.4.1 - Breath Engine (original implementation) */
+#include "fm1.h"
+#define N 6
+#define FULL 16777216
+#define COUNT 20
+static const char *const notes[]={"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+static const char *const names[]={"ANALOG SINE","CATHEDRAL","CLEAN ORGAN","DARK ANALOG","DARK UNO","DEFAULT","RESONANT CLOUD","SOFT SQUARE","STRINGS","TRIANGLE CORE","HEAVEN OPEN","HOLY PRESENCE","ATMOSPHERE","ETERNAL","SOAKING","ABBA","HOLY STRINGS","ENDLESS GLORY","AMBIENT GUITAR","SECRET PLACE"};
+typedef struct {int w[N],o[N],shape,detune;} Patch;
+static const Patch patches[COUNT]={
+{{9000,3500,4200,1800,900,500},{0,0,7,12,12,19},0,10},
+{{6500,3500,4200,3300,2400,1800},{0,0,7,12,19,24},1,12},
+{{6500,5000,4000,2800,2200,1200},{0,0,7,12,12,19},0,8},
+{{8500,4500,3500,1600,900,500},{0,0,7,12,12,19},2,18},
+{{10000,5000,2800,1200,600,300},{-12,0,7,12,12,19},0,5},
+{{7000,4000,4200,2500,1800,900},{0,0,7,12,12,19},3,16},
+{{5400,4800,1700,3600,3300,1200},{12,12,19,12,12,0},14,24},
+{{7500,4000,4000,2000,1200,600},{0,0,7,12,12,19},5,15},
+{{5200,4800,4200,3500,2400,1600},{0,0,7,12,12,19},6,25},
+{{8500,4000,3600,2200,1200,600},{0,0,7,12,12,19},7,10},
+{{4200,3300,4200,4400,2700,1600},{0,12,7,12,24,31},8,18},
+{{7600,3200,4200,2800,1700,900},{0,-12,7,12,19,24},9,9},
+{{5500,2500,3700,3500,3300,1400},{0,12,7,19,24,31},10,22},
+{{6500,3200,4000,3700,2200,1100},{0,-12,7,12,24,19},8,15},
+{{8500,1800,4000,2500,900,400},{0,0,7,12,19,24},11,4},
+{{7200,2600,4200,2800,1200,700},{0,12,7,12,19,24},7,8},
+{{5200,3500,4300,3900,2500,1400},{0,12,7,12,19,24},12,20},
+{{4800,2600,3800,3600,3000,2400},{0,12,7,19,24,31},10,14},
+{{6300,3000,4400,2800,1500,900},{0,12,7,12,19,24},13,9},
+{{9500,1500,3500,1600,600,300},{0,-12,7,12,19,24},11,3}
+};
+typedef struct {uint32_t ph[N],inc[N];int32_t amp;int root,preset,oct,mode;uint32_t hp[3],hi[3],clock;int alternate;int32_t flowLow[2],flowBand[2];int32_t breathLo[3],breathBp[3];int breathF[3];} Bank;
+static Bank bank[2];static int current;
 static volatile uint32_t request=(6u<<4)|(2u<<9);
 static volatile int level=85,tone=55,motion=0,fade=5,quiet=1;
 static int root=0,preset=6,oct=0,playing=0,theme=0;
